@@ -1,0 +1,15 @@
+[package]
+name = "dirhashmake"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dirhashmake"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+csv = "1"
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4" }
