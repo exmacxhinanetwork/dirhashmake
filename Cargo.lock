@@ -232,6 +232,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "libc",
  "sha2",
  "tokio",
 ]

@@ -10,13 +10,15 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone)]
+/// Represents the type of a filesystem entry.
+#[derive(Debug, Clone, PartialEq)]
 enum EntryType {
     File,
     Dir,
     Symlink,
 }
 
+/// A filesystem entry discovered during directory traversal.
 #[derive(Debug, Clone)]
 struct Entry {
     path: PathBuf,
@@ -28,6 +30,7 @@ struct Entry {
     link_target: Option<String>,
 }
 
+/// Statistics gathered during the pre-scan phase.
 #[derive(Debug)]
 struct ScanStats {
     total_entries: u64,
@@ -38,34 +41,48 @@ struct ScanStats {
     scan_duration: Duration,
 }
 
+/// CLI argument parser.
 #[derive(Parser)]
-#[command(name = "dirhashmake")]
+#[command(
+    name = "dirhashmake",
+    about = "Hash local directories with SHA-256 and export as CSV"
+)]
 struct Args {
+    /// Directory to hash
     #[arg(default_value = ".")]
     directory: PathBuf,
 
+    /// Output CSV file (default: stdout)
     #[arg(short, long)]
     output: Option<PathBuf>,
 
+    /// Verbose progress output to stderr
     #[arg(short, long)]
     verbose: bool,
 
+    /// Number of parallel worker tasks
     #[arg(short = 'j', long)]
     jobs: Option<usize>,
 
+    /// Use absolute paths instead of relative
     #[arg(long)]
     absolute: bool,
 
+    /// Pause and prompt before hashing begins (value: scan)
     #[arg(long, value_parser = ["scan"])]
     confirm: Option<String>,
 
+    /// Recurse into subdirectories
     #[arg(short = 'r', long, default_value_t = true)]
     recursive: bool,
 
+    /// Maximum recursion depth (requires --recursive)
     #[arg(long)]
     max_depth: Option<usize>,
 }
 
+/// Parse environment variable options from a colon-separated key=value string.
+/// The env var name is derived from the executable name (uppercased).
 fn parse_env_options() -> HashMap<String, String> {
     let binary_name = std::env::current_exe()
         .ok()
@@ -84,6 +101,7 @@ fn parse_env_options() -> HashMap<String, String> {
     }
 }
 
+/// Format a byte count into a human-readable string (B, KiB, MiB, GiB).
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -100,6 +118,8 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Recursively walk a directory tree asynchronously, sending entries through a channel.
+/// Respects the `max_depth` limit and skips symlinked directories.
 async fn walk_dir_async(
     root: &Path,
     recursive: bool,
@@ -151,7 +171,10 @@ async fn walk_dir_async(
 
         let (size, modified) = if file_type.is_file() || file_type.is_dir() {
             match direntry.metadata().await {
-                Ok(meta) => (Some(meta.len()), meta.modified().ok().map(DateTime::<Utc>::from)),
+                Ok(meta) => (
+                    Some(meta.len()),
+                    meta.modified().ok().map(DateTime::<Utc>::from),
+                ),
                 Err(_) => (None, None),
             }
         } else {
@@ -194,6 +217,8 @@ async fn walk_dir_async(
     }
 }
 
+/// Collect all filesystem entries under `root` using async directory traversal.
+/// Returns a vector of `Entry` structs with metadata pre-populated.
 async fn collect_entries_async(
     root: &Path,
     recursive: bool,
@@ -206,28 +231,41 @@ async fn collect_entries_async(
     let tx_clone = tx.clone();
 
     tokio::spawn(async move {
-        let root_entry_type = if tokio::fs::symlink_metadata(&root_path).await.is_ok_and(|m| m.is_symlink()) {
+        let root_entry_type = if tokio::fs::symlink_metadata(&root_path)
+            .await
+            .is_ok_and(|m| m.is_symlink())
+        {
             EntryType::Symlink
-        } else if tokio::fs::metadata(&root_path).await.is_ok_and(|m| m.is_dir()) {
+        } else if tokio::fs::metadata(&root_path)
+            .await
+            .is_ok_and(|m| m.is_dir())
+        {
             EntryType::Dir
         } else {
             EntryType::File
         };
 
         let root_link_target = if matches!(root_entry_type, EntryType::Symlink) {
-            tokio::fs::read_link(&root_path).await.ok().map(|p| p.to_string_lossy().to_string())
+            tokio::fs::read_link(&root_path)
+                .await
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
         } else {
             None
         };
 
-        let (root_size, root_modified) = if matches!(root_entry_type, EntryType::File | EntryType::Dir) {
-            match tokio::fs::metadata(&root_path).await {
-                Ok(meta) => (Some(meta.len()), meta.modified().ok().map(DateTime::<Utc>::from)),
-                Err(_) => (None, None),
-            }
-        } else {
-            (None, None)
-        };
+        let (root_size, root_modified) =
+            if matches!(root_entry_type, EntryType::File | EntryType::Dir) {
+                match tokio::fs::metadata(&root_path).await {
+                    Ok(meta) => (
+                        Some(meta.len()),
+                        meta.modified().ok().map(DateTime::<Utc>::from),
+                    ),
+                    Err(_) => (None, None),
+                }
+            } else {
+                (None, None)
+            };
 
         let root_relative = if absolute {
             root_path.canonicalize().unwrap_or(root_path.clone())
@@ -246,15 +284,9 @@ async fn collect_entries_async(
         };
         let _ = tx_clone.send(root_entry).await;
 
-        if matches!(root_entry_type, EntryType::Dir) && recursive {
+        if matches!(root_entry_type, EntryType::Dir) {
             walk_dir_async(
-                &root_path,
-                recursive,
-                max_depth,
-                0,
-                &tx_clone,
-                &root_path,
-                absolute,
+                &root_path, recursive, max_depth, 0, &tx_clone, &root_path, absolute,
             )
             .await;
         }
@@ -269,6 +301,7 @@ async fn collect_entries_async(
     entries
 }
 
+/// Perform a pre-scan of the directory to gather statistics without hashing file contents.
 async fn run_pre_scan_async(
     root: &Path,
     recursive: bool,
@@ -368,7 +401,11 @@ async fn run() {
     let absolute = args.absolute;
     let verbose = args.verbose;
     let recursive = args.recursive;
-    let max_depth = if args.recursive { args.max_depth } else { Some(0) };
+    let max_depth = if args.recursive {
+        args.max_depth
+    } else {
+        Some(0)
+    };
     let jobs = args.jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -446,10 +483,7 @@ async fn run() {
     write_csv(&final_entries, &args.output).unwrap();
 }
 
-async fn process_entry(
-    entry: Entry,
-    _absolute: bool,
-) -> Result<Entry, String> {
+async fn process_entry(entry: Entry, _absolute: bool) -> Result<Entry, String> {
     let path = entry.path.clone();
     let relative_path = entry.relative_path.clone();
     let entry_type = entry.entry_type.clone();
@@ -460,10 +494,7 @@ async fn process_entry(
                 .await
                 .map_err(|e| e.to_string())?;
             let size = metadata.len();
-            let modified = metadata
-                .modified()
-                .ok()
-                .map(DateTime::<Utc>::from);
+            let modified = metadata.modified().ok().map(DateTime::<Utc>::from);
 
             let file = tokio::fs::File::open(&path)
                 .await
@@ -492,32 +523,31 @@ async fn process_entry(
                 link_target: None,
             })
         }
-        EntryType::Symlink => {
-            Ok(Entry {
-                path,
-                relative_path,
-                entry_type: EntryType::Symlink,
-                sha256: None,
-                size: None,
-                modified: None,
-                link_target: entry.link_target,
-            })
-        }
-        EntryType::Dir => {
-            Ok(Entry {
-                path,
-                relative_path,
-                entry_type: EntryType::Dir,
-                sha256: None,
-                size: None,
-                modified: None,
-                link_target: None,
-            })
-        }
+        EntryType::Symlink => Ok(Entry {
+            path,
+            relative_path,
+            entry_type: EntryType::Symlink,
+            sha256: None,
+            size: None,
+            modified: None,
+            link_target: entry.link_target,
+        }),
+        EntryType::Dir => Ok(Entry {
+            path,
+            relative_path,
+            entry_type: EntryType::Dir,
+            sha256: None,
+            size: None,
+            modified: None,
+            link_target: None,
+        }),
     }
 }
 
-fn write_csv(entries: &[Entry], output: &Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn write_csv(
+    entries: &[Entry],
+    output: &Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut wtr: Writer<Box<dyn Write>> = if let Some(path) = output {
         let file = std::fs::File::create(path)?;
         Writer::from_writer(Box::new(file))
@@ -551,3 +581,4 @@ fn write_csv(entries: &[Entry], output: &Option<PathBuf>) -> Result<(), Box<dyn 
     wtr.flush()?;
     Ok(())
 }
+
