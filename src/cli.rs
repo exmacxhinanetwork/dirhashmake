@@ -1,23 +1,66 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::io::Write;
 use std::path::PathBuf;
 
 use clap::Parser;
 
+/// Supported export formats.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ExportFormat {
+    #[default]
+    Csv,
+    Json,
+    Yaml,
+    Sql,
+    Html,
+}
+
+impl fmt::Display for ExportFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExportFormat::Csv => write!(f, "csv"),
+            ExportFormat::Json => write!(f, "json"),
+            ExportFormat::Yaml => write!(f, "yaml"),
+            ExportFormat::Sql => write!(f, "sql"),
+            ExportFormat::Html => write!(f, "html"),
+        }
+    }
+}
+
+impl std::str::FromStr for ExportFormat {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "csv" => Ok(ExportFormat::Csv),
+            "json" => Ok(ExportFormat::Json),
+            "yaml" | "yml" => Ok(ExportFormat::Yaml),
+            "sql" => Ok(ExportFormat::Sql),
+            "html" | "htm" => Ok(ExportFormat::Html),
+            other => Err(format!("unknown format: {other}")),
+        }
+    }
+}
+
 /// CLI argument parser.
 #[derive(Parser)]
 #[command(
     name = "dirhashmake",
-    about = "Hash local directories with SHA-256 and export as CSV"
+    about = "Hash local directories with SHA-256 and export results"
 )]
 pub struct Args {
     /// Directory to hash
     #[arg(default_value = ".")]
     pub directory: PathBuf,
 
-    /// Output CSV file (default: stdout)
+    /// Output file (default: stdout)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Export format (csv, json, yaml, sql, html)
+    #[arg(short, long, default_value = "csv")]
+    pub format: ExportFormat,
 
     /// Verbose progress output to stderr
     #[arg(short, long)]
@@ -76,6 +119,12 @@ pub fn merge_env_options(args: &mut Args, env_opts: &HashMap<String, String>) {
             if v == "scan" {
                 args.confirm = Some("scan".to_string());
             }
+        }
+    }
+
+    if let Some(fmt_str) = env_opts.get("format") {
+        if let Ok(fmt) = fmt_str.parse::<ExportFormat>() {
+            args.format = fmt;
         }
     }
 }

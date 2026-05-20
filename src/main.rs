@@ -1,6 +1,6 @@
 mod cli;
+mod formatters;
 mod hasher;
-mod output;
 mod scanner;
 mod types;
 
@@ -12,7 +12,6 @@ use tokio::task::JoinSet;
 
 use cli::{confirm_scan, merge_env_options, parse_env_options, Args};
 use hasher::process_entry;
-use output::{print_stats, write_csv};
 use scanner::{collect_entries, run_pre_scan};
 use types::EntryType;
 
@@ -50,7 +49,7 @@ async fn run() {
     });
 
     let scan_stats = run_pre_scan(&root, recursive, max_depth, absolute).await;
-    print_stats(&scan_stats, verbose);
+    formatters::print_stats(&scan_stats, verbose);
 
     if args.confirm.as_deref() == Some("scan") && !confirm_scan() {
         eprintln!("Aborted.");
@@ -117,5 +116,5 @@ async fn run() {
         );
     }
 
-    write_csv(&final_entries, &args.output).unwrap();
+    formatters::write_output(&final_entries, &args.output, args.format).unwrap();
 }
